@@ -1,0 +1,27 @@
+name: cool-tool
+version: 1.2.0
+description: "A nifty CLI tool"
+homepage: "https://github.com/owner/cool-tool"
+license: "MIT"
+authors:
+  - "Owner <owner@example.com>"
+
+# Release-based installation (preferred)
+release_assets:
+  - url: "https://github.com/owner/cool-tool/releases/download/v1.2.0/cool-tool-linux-amd64.tar.gz"
+    platform: "linux/amd64"
+    checksum:
+      sha256: "0123456789abcdef...<trimmed>"
+
+# Optional build-from-source section
+build:
+  repo: "https://github.com/owner/cool-tool.git"
+  build_steps:
+    - "make"
+    - "make install PREFIX={install_prefix}"
+  build_env:
+    - "CGO_ENABLED=0"
+
+files_to_install:
+  - "bin/cool-tool"
+  - "share/man/man1/cool-tool.1"
