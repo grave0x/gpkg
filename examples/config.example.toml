@@ -1,0 +1,20 @@
+# gpkg example config (save as ~/.gpkg/config.toml)
+# Default install prefix
+install_prefix = "~/.gpkg"
+
+# Package DB path (sqlite)
+pkgdb_path = "~/.gpkg/pkgdb.sqlite"
+
+# Sources directory (contains one file per source)
+sources_dir = "~/.gpkg/sources.d"
+
+# Verbosity: "info", "debug", "warn", "error"
+log_level = "info"
+
+# Network options
+download_concurrency = 4
+download_timeout_seconds = 120
+
+# Policies
+require_checksums = true
+allow_unverified_source_builds = false
