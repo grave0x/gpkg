@@ -1,0 +1,919 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g., v0.1.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+  packages: write
+
+jobs:
+  build-and-release:
+    name: Build and Release
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.22'
+        cache: true
+
+    - name: Determine version
+      id: version
+      run: |
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          VERSION="${{ github.event.inputs.tag }}"
+        else
+          VERSION="${GITHUB_REF#refs/tags/}"
+        fi
+        echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
+        echo "Building version: ${VERSION}"
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Run tests
+      run: go test -v ./...
+
+    - name: Build multi-platform binaries
+      env:
+        VERSION: ${{ steps.version.outputs.VERSION }}
+      run: |
+        mkdir -p dist
+        
+        # Linux builds
+        echo "Building for Linux..."
+        GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build -ldflags "-X main.version=${VERSION} -s -w" -trimpath -o dist/gpkg-${VERSION}-linux-amd64 ./cmd/gpkg
+        GOOS=linux GOARCH=arm64 CGO_ENABLED=1 go build -ldflags "-X main.version=${VERSION} -s -w" -trimpath -o dist/gpkg-${VERSION}-linux-arm64 ./cmd/gpkg
+        GOOS=linux GOARCH=386 CGO_ENABLED=1 go build -ldflags "-X main.version=${VERSION} -s -w" -trimpath -o dist/gpkg-${VERSION}-linux-386 ./cmd/gpkg
+        
+        # macOS builds
+        echo "Building for macOS..."
+        GOOS=darwin GOARCH=amd64 CGO_ENABLED=1 go build -ldflags "-X main.version=${VERSION} -s -w" -trimpath -o dist/gpkg-${VERSION}-darwin-amd64 ./cmd/gpkg
+        GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 go build -ldflags "-X main.version=${VERSION} -s -w" -trimpath -o dist/gpkg-${VERSION}-darwin-arm64 ./cmd/gpkg
+        
+        # Windows builds
+        echo "Building for Windows..."
+        GOOS=windows GOARCH=amd64 CGO_ENABLED=1 go build -ldflags "-X main.version=${VERSION} -s -w" -trimpath -o dist/gpkg-${VERSION}-windows-amd64.exe ./cmd/gpkg
+        GOOS=windows GOARCH=386 CGO_ENABLED=1 go build -ldflags "-X main.version=${VERSION} -s -w" -trimpath -o dist/gpkg-${VERSION}-windows-386.exe ./cmd/gpkg
+
+    - name: Generate changelog
+      id: changelog
+      run: |
+        VERSION="${{ steps.version.outputs.VERSION }}"
+        
+        # Get the previous tag
+        PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+        
+        if [ -z "$PREV_TAG" ]; then
+          echo "No previous tag found, getting all commits"
+          COMMIT_RANGE="HEAD"
+        else
+          echo "Previous tag: $PREV_TAG"
+          COMMIT_RANGE="${PREV_TAG}..HEAD"
+        fi
+        
+        # Get commits with full message
+        COMMITS=$(git log $COMMIT_RANGE --pretty=format:"%s|||%b|||%H" --no-merges)
+        
+        # Initialize category arrays
+        declare -a added=()
+        declare -a changed=()
+        declare -a fixed=()
+        declare -a security=()
+        declare -a breaking=()
+        declare -a other=()
+        
+        # Parse commits and categorize
+        while IFS='|||' read -r subject body hash; do
+          # Skip empty lines
+          [ -z "$subject" ] && continue
+          
+          # Check for breaking changes in body or subject
+          if echo "$body" | grep -qi "BREAKING[- ]CHANGE:" || echo "$subject" | grep -q "!:"; then
+            breaking+=("- $subject ([${hash:0:7}](https://github.com/${{ github.repository }}/commit/$hash))")
+          fi
+          
+          # Categorize based on conventional commits format
+          if echo "$subject" | grep -qiE "^feat(\(.*\))?:"; then
+            msg=$(echo "$subject" | sed -E 's/^feat(\(.*\))?:[[:space:]]*//')
+            added+=("- $msg ([${hash:0:7}](https://github.com/${{ github.repository }}/commit/$hash))")
+          elif echo "$subject" | grep -qiE "^fix(\(.*\))?:"; then
+            msg=$(echo "$subject" | sed -E 's/^fix(\(.*\))?:[[:space:]]*//')
+            fixed+=("- $msg ([${hash:0:7}](https://github.com/${{ github.repository }}/commit/$hash))")
+          elif echo "$subject" | grep -qiE "^(security|sec)(\(.*\))?:"; then
+            msg=$(echo "$subject" | sed -E 's/^(security|sec)(\(.*\))?:[[:space:]]*//')
+            security+=("- $msg ([${hash:0:7}](https://github.com/${{ github.repository }}/commit/$hash))")
+          elif echo "$subject" | grep -qiE "^(change|chore|refactor|perf|style)(\(.*\))?:"; then
+            msg=$(echo "$subject" | sed -E 's/^[^:]+:[[:space:]]*//')
+            changed+=("- $msg ([${hash:0:7}](https://github.com/${{ github.repository }}/commit/$hash))")
+          else
+            # Not using conventional commits - add to other
+            other+=("- $subject ([${hash:0:7}](https://github.com/${{ github.repository }}/commit/$hash))")
+          fi
+        done <<< "$COMMITS"
+        
+        # Build changelog
+        CHANGELOG=""
+        
+        if [ ${#breaking[@]} -gt 0 ]; then
+          CHANGELOG+="### ⚠️ Breaking Changes"$'\n\n'
+          printf '%s\n' "${breaking[@]}" >> changelog_tmp.txt
+          CHANGELOG+="$(cat changelog_tmp.txt)"$'\n\n'
+          rm changelog_tmp.txt
+        fi
+        
+        if [ ${#added[@]} -gt 0 ]; then
+          CHANGELOG+="### ✨ Added"$'\n\n'
+          printf '%s\n' "${added[@]}" >> changelog_tmp.txt
+          CHANGELOG+="$(cat changelog_tmp.txt)"$'\n\n'
+          rm changelog_tmp.txt
+        fi
+        
+        if [ ${#changed[@]} -gt 0 ]; then
+          CHANGELOG+="### 🔄 Changed"$'\n\n'
+          printf '%s\n' "${changed[@]}" >> changelog_tmp.txt
+          CHANGELOG+="$(cat changelog_tmp.txt)"$'\n\n'
+          rm changelog_tmp.txt
+        fi
+        
+        if [ ${#fixed[@]} -gt 0 ]; then
+          CHANGELOG+="### 🐛 Fixed"$'\n\n'
+          printf '%s\n' "${fixed[@]}" >> changelog_tmp.txt
+          CHANGELOG+="$(cat changelog_tmp.txt)"$'\n\n'
+          rm changelog_tmp.txt
+        fi
+        
+        if [ ${#security[@]} -gt 0 ]; then
+          CHANGELOG+="### 🔒 Security"$'\n\n'
+          printf '%s\n' "${security[@]}" >> changelog_tmp.txt
+          CHANGELOG+="$(cat changelog_tmp.txt)"$'\n\n'
+          rm changelog_tmp.txt
+        fi
+        
+        if [ ${#other[@]} -gt 0 ]; then
+          CHANGELOG+="### 📝 Other Changes"$'\n\n'
+          printf '%s\n' "${other[@]}" >> changelog_tmp.txt
+          CHANGELOG+="$(cat changelog_tmp.txt)"$'\n\n'
+          rm changelog_tmp.txt
+        fi
+        
+        # If no categorized changes found, show a message
+        if [ -z "$CHANGELOG" ]; then
+          CHANGELOG="No changes in this release."$'\n'
+        fi
+        
+        # Save to file
+        echo "$CHANGELOG" > changelog.md
+        
+        # Output for use in next steps
+        echo "CHANGELOG<<CHANGELOG_EOF" >> $GITHUB_OUTPUT
+        echo "$CHANGELOG" >> $GITHUB_OUTPUT
+        echo "CHANGELOG_EOF" >> $GITHUB_OUTPUT
+        
+        echo "Generated changelog:"
+        cat changelog.md
+
+    - name: Generate checksums
+      run: |
+        cd dist
+        sha256sum * > checksums.txt
+        cat checksums.txt
+
+    - name: Create archives
+      run: |
+        cd dist
+        for file in gpkg-*; do
+          if [[ "$file" == *.exe ]]; then
+            # Windows binaries
+            zip "${file%.exe}.zip" "$file"
+          else
+            # Unix binaries
+            tar -czf "${file}.tar.gz" "$file"
+          fi
+        done
+        ls -lh
+
+    - name: Generate release notes
+      id: release_notes
+      run: |
+        VERSION="${{ steps.version.outputs.VERSION }}"
+        cat > release_notes.md << 'EOF'
+        ## gpkg ${{ steps.version.outputs.VERSION }}
+        
+        ## 📋 Changelog
+        
+        EOF
+        
+        # Append the generated changelog
+        cat changelog.md >> release_notes.md
+        
+        cat >> release_notes.md << 'EOF'
+        
+        ---
+        
+        ## 📦 Downloads
+        
+        Download the appropriate binary for your platform:
+        
+        **Linux:**
+        - [gpkg-${{ steps.version.outputs.VERSION }}-linux-amd64.tar.gz](https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/gpkg-${{ steps.version.outputs.VERSION }}-linux-amd64.tar.gz)
+        - [gpkg-${{ steps.version.outputs.VERSION }}-linux-arm64.tar.gz](https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/gpkg-${{ steps.version.outputs.VERSION }}-linux-arm64.tar.gz)
+        - [gpkg-${{ steps.version.outputs.VERSION }}-linux-386.tar.gz](https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/gpkg-${{ steps.version.outputs.VERSION }}-linux-386.tar.gz)
+        
+        **macOS:**
+        - [gpkg-${{ steps.version.outputs.VERSION }}-darwin-amd64.tar.gz](https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/gpkg-${{ steps.version.outputs.VERSION }}-darwin-amd64.tar.gz)
+        - [gpkg-${{ steps.version.outputs.VERSION }}-darwin-arm64.tar.gz](https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/gpkg-${{ steps.version.outputs.VERSION }}-darwin-arm64.tar.gz) (Apple Silicon)
+        
+        **Windows:**
+        - [gpkg-${{ steps.version.outputs.VERSION }}-windows-amd64.zip](https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/gpkg-${{ steps.version.outputs.VERSION }}-windows-amd64.zip)
+        - [gpkg-${{ steps.version.outputs.VERSION }}-windows-386.zip](https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/gpkg-${{ steps.version.outputs.VERSION }}-windows-386.zip)
+        
+        ### Verification
+        
+        Verify your download with the checksums:
+        - [checksums.txt](https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/checksums.txt)
+        
+        ### Installation
+        
+        **Linux/macOS:**
+        ```bash
+        tar -xzf gpkg-${{ steps.version.outputs.VERSION }}-*.tar.gz
+        sudo mv gpkg-${{ steps.version.outputs.VERSION }}-* /usr/local/bin/gpkg
+        chmod +x /usr/local/bin/gpkg
+        ```
+        
+        **Windows:**
+        Extract the zip file and add the binary to your PATH.
+        EOF
+        
+        echo "RELEASE_NOTES<<EOF" >> $GITHUB_OUTPUT
+        cat release_notes.md >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ steps.version.outputs.VERSION }}
+        name: Release ${{ steps.version.outputs.VERSION }}
+        body_path: release_notes.md
+        draft: false
+        prerelease: false
+        files: |
+          dist/*.tar.gz
+          dist/*.zip
+          dist/checksums.txt
+        fail_on_unmatched_files: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Update latest tag
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git tag -f latest
+        git push origin latest --force
+      if: ${{ !contains(steps.version.outputs.VERSION, '-') }}
+
+  update-homebrew:
+    name: Update Homebrew Formula
+    runs-on: ubuntu-latest
+    needs: build-and-release
+    if: ${{ !contains(needs.build-and-release.outputs.VERSION, '-') }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Determine version
+      id: version
+      run: |
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          VERSION="${{ github.event.inputs.tag }}"
+        else
+          VERSION="${GITHUB_REF#refs/tags/}"
+        fi
+        # Remove 'v' prefix for formula version
+        VERSION_NO_V="${VERSION#v}"
+        echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
+        echo "VERSION_NO_V=${VERSION_NO_V}" >> $GITHUB_OUTPUT
+        echo "Updating Homebrew formula for version: ${VERSION}"
+
+    - name: Download release archives
+      env:
+        VERSION: ${{ steps.version.outputs.VERSION }}
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        mkdir -p homebrew-temp
+        cd homebrew-temp
+        
+        echo "Downloading macOS and Linux archives..."
+        
+        # Download Darwin (macOS) binaries
+        gh release download "${VERSION}" \
+          --repo "${{ github.repository }}" \
+          --pattern "*darwin-amd64.tar.gz"
+        
+        gh release download "${VERSION}" \
+          --repo "${{ github.repository }}" \
+          --pattern "*darwin-arm64.tar.gz"
+        
+        # Download Linux binaries for completeness
+        gh release download "${VERSION}" \
+          --repo "${{ github.repository }}" \
+          --pattern "*linux-amd64.tar.gz"
+        
+        gh release download "${VERSION}" \
+          --repo "${{ github.repository }}" \
+          --pattern "*linux-arm64.tar.gz"
+        
+        gh release download "${VERSION}" \
+          --repo "${{ github.repository }}" \
+          --pattern "*linux-386.tar.gz"
+        
+        ls -lh
+
+    - name: Calculate SHA256 checksums
+      id: checksums
+      run: |
+        cd homebrew-temp
+        
+        echo "Calculating SHA256 checksums..."
+        
+        # Calculate checksums for each binary
+        SHA_DARWIN_AMD64=$(sha256sum *darwin-amd64.tar.gz | awk '{print $1}')
+        SHA_DARWIN_ARM64=$(sha256sum *darwin-arm64.tar.gz | awk '{print $1}')
+        SHA_LINUX_AMD64=$(sha256sum *linux-amd64.tar.gz | awk '{print $1}')
+        SHA_LINUX_ARM64=$(sha256sum *linux-arm64.tar.gz | awk '{print $1}')
+        SHA_LINUX_386=$(sha256sum *linux-386.tar.gz | awk '{print $1}')
+        
+        # Output checksums
+        echo "Darwin AMD64 (Intel Mac):   $SHA_DARWIN_AMD64"
+        echo "Darwin ARM64 (Apple Silicon): $SHA_DARWIN_ARM64"
+        echo "Linux AMD64:                 $SHA_LINUX_AMD64"
+        echo "Linux ARM64:                 $SHA_LINUX_ARM64"
+        echo "Linux 386:                   $SHA_LINUX_386"
+        
+        # Set outputs
+        echo "SHA_DARWIN_AMD64=$SHA_DARWIN_AMD64" >> $GITHUB_OUTPUT
+        echo "SHA_DARWIN_ARM64=$SHA_DARWIN_ARM64" >> $GITHUB_OUTPUT
+        echo "SHA_LINUX_AMD64=$SHA_LINUX_AMD64" >> $GITHUB_OUTPUT
+        echo "SHA_LINUX_ARM64=$SHA_LINUX_ARM64" >> $GITHUB_OUTPUT
+        echo "SHA_LINUX_386=$SHA_LINUX_386" >> $GITHUB_OUTPUT
+
+    - name: Update Homebrew formula
+      env:
+        VERSION_NO_V: ${{ steps.version.outputs.VERSION_NO_V }}
+        SHA_DARWIN_AMD64: ${{ steps.checksums.outputs.SHA_DARWIN_AMD64 }}
+        SHA_DARWIN_ARM64: ${{ steps.checksums.outputs.SHA_DARWIN_ARM64 }}
+        SHA_LINUX_AMD64: ${{ steps.checksums.outputs.SHA_LINUX_AMD64 }}
+        SHA_LINUX_ARM64: ${{ steps.checksums.outputs.SHA_LINUX_ARM64 }}
+        SHA_LINUX_386: ${{ steps.checksums.outputs.SHA_LINUX_386 }}
+      run: |
+        echo "Generating updated Homebrew formula..."
+        
+        cat > homebrew/gpkg.rb << 'FORMULA_EOF'
+# Homebrew Formula for gpkg
+# This formula is automatically updated by the release workflow
+class Gpkg < Formula
+  desc "Simple, user-focused package manager for GitHub releases and source builds"
+  homepage "https://github.com/grave0x/gpkg"
+  version "VERSION_PLACEHOLDER"
+  license "MIT"
+
+  on_macos do
+    if Hardware::CPU.arm?
+      url "https://github.com/grave0x/gpkg/releases/download/vVERSION_PLACEHOLDER/gpkg-vVERSION_PLACEHOLDER-darwin-arm64.tar.gz"
+      sha256 "SHA_DARWIN_ARM64_PLACEHOLDER"
+    else
+      url "https://github.com/grave0x/gpkg/releases/download/vVERSION_PLACEHOLDER/gpkg-vVERSION_PLACEHOLDER-darwin-amd64.tar.gz"
+      sha256 "SHA_DARWIN_AMD64_PLACEHOLDER"
+    end
+  end
+
+  on_linux do
+    if Hardware::CPU.arm?
+      url "https://github.com/grave0x/gpkg/releases/download/vVERSION_PLACEHOLDER/gpkg-vVERSION_PLACEHOLDER-linux-arm64.tar.gz"
+      sha256 "SHA_LINUX_ARM64_PLACEHOLDER"
+    elsif Hardware::CPU.intel?
+      if Hardware::CPU.is_64_bit?
+        url "https://github.com/grave0x/gpkg/releases/download/vVERSION_PLACEHOLDER/gpkg-vVERSION_PLACEHOLDER-linux-amd64.tar.gz"
+        sha256 "SHA_LINUX_AMD64_PLACEHOLDER"
+      else
+        url "https://github.com/grave0x/gpkg/releases/download/vVERSION_PLACEHOLDER/gpkg-vVERSION_PLACEHOLDER-linux-386.tar.gz"
+        sha256 "SHA_LINUX_386_PLACEHOLDER"
+      end
+    end
+  end
+
+  depends_on "sqlite"
+
+  def install
+    bin.install "gpkg-v#{version}-#{OS.kernel_name.downcase}-#{Hardware::CPU.arch}" => "gpkg"
+  end
+
+  test do
+    assert_match version.to_s, shell_output("#{bin}/gpkg --version")
+  end
+end
+FORMULA_EOF
+
+        # Replace placeholders with actual values
+        sed -i "s/VERSION_PLACEHOLDER/${VERSION_NO_V}/g" homebrew/gpkg.rb
+        sed -i "s/SHA_DARWIN_AMD64_PLACEHOLDER/${SHA_DARWIN_AMD64}/g" homebrew/gpkg.rb
+        sed -i "s/SHA_DARWIN_ARM64_PLACEHOLDER/${SHA_DARWIN_ARM64}/g" homebrew/gpkg.rb
+        sed -i "s/SHA_LINUX_AMD64_PLACEHOLDER/${SHA_LINUX_AMD64}/g" homebrew/gpkg.rb
+        sed -i "s/SHA_LINUX_ARM64_PLACEHOLDER/${SHA_LINUX_ARM64}/g" homebrew/gpkg.rb
+        sed -i "s/SHA_LINUX_386_PLACEHOLDER/${SHA_LINUX_386}/g" homebrew/gpkg.rb
+        
+        echo "Updated formula:"
+        cat homebrew/gpkg.rb
+
+    - name: Commit and push updated formula
+      env:
+        VERSION: ${{ steps.version.outputs.VERSION }}
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        
+        # Create a new branch for the formula update
+        git checkout -b homebrew-update-${VERSION}
+        
+        # Stage and commit the updated formula
+        git add homebrew/gpkg.rb
+        
+        if git diff --staged --quiet; then
+          echo "No changes to commit"
+          exit 0
+        fi
+        
+        git commit -m "chore: update Homebrew formula to ${VERSION}
+
+This formula update includes:
+- Version bump to ${VERSION}
+- Updated SHA256 checksums for all platforms
+- Support for both Intel and Apple Silicon Macs
+- Support for Linux AMD64, ARM64, and 386
+
+Automated update from release workflow.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
+        
+        git push origin homebrew-update-${VERSION}
+
+    - name: Create Pull Request for formula update
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        VERSION: ${{ steps.version.outputs.VERSION }}
+      run: |
+        gh pr create \
+          --title "Update Homebrew formula to ${VERSION}" \
+          --body "## Automated Homebrew Formula Update
+
+This PR updates the Homebrew formula to version ${VERSION}.
+
+### Changes:
+- ✅ Version updated to ${VERSION}
+- ✅ SHA256 checksums updated for all platforms
+  - macOS Intel (darwin-amd64)
+  - macOS Apple Silicon (darwin-arm64)
+  - Linux AMD64
+  - Linux ARM64
+  - Linux 386
+- ✅ URLs updated to point to new release assets
+
+### Verification:
+The formula has been automatically generated with checksums calculated from the release archives.
+
+### Next Steps:
+1. Review and merge this PR
+2. Consider submitting to [homebrew-core](https://github.com/Homebrew/homebrew-core) or create a tap repository
+3. Users can install with: \`brew install gpkg\` (once in homebrew-core or tap)
+
+---
+🤖 This PR was automatically created by the release workflow." \
+          --base main \
+          --head homebrew-update-${VERSION} \
+          --label "automated" \
+          --label "homebrew"
+
+    - name: Comment on successful update
+      if: success()
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        VERSION: ${{ steps.version.outputs.VERSION }}
+      run: |
+        echo "✅ Homebrew formula has been updated successfully!"
+        echo ""
+        echo "📝 A pull request has been created to merge the updated formula."
+        echo ""
+        echo "🍺 To submit to Homebrew core, follow these steps:"
+        echo "1. Fork https://github.com/Homebrew/homebrew-core"
+        echo "2. Add the formula to Formula/g/gpkg.rb"
+        echo "3. Submit a PR following Homebrew's guidelines"
+        echo ""
+        echo "🏠 Or create your own tap:"
+        echo "1. Create a new repository: homebrew-gpkg"
+        echo "2. Add the formula to Formula/gpkg.rb"
+        echo "3. Users can install with: brew tap grave0x/gpkg && brew install gpkg"
+
+  build-snap-package:
+    name: Build and Publish Snap Package
+    runs-on: ubuntu-latest
+    needs: build-and-release
+    if: ${{ !contains(needs.build-and-release.outputs.VERSION, '-') }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Determine version
+      id: version
+      run: |
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          VERSION="${{ github.event.inputs.tag }}"
+        else
+          VERSION="${GITHUB_REF#refs/tags/}"
+        fi
+        VERSION_NO_V="${VERSION#v}"
+        echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
+        echo "VERSION_NO_V=${VERSION_NO_V}" >> $GITHUB_OUTPUT
+        echo "Building Snap for version: ${VERSION}"
+
+    - name: Create snapcraft.yaml
+      env:
+        VERSION_NO_V: ${{ steps.version.outputs.VERSION_NO_V }}
+        VERSION: ${{ steps.version.outputs.VERSION }}
+      run: |
+        mkdir -p snap
+        cat > snap/snapcraft.yaml << 'SNAP_EOF'
+name: gpkg
+base: core22
+version: 'VERSION_NO_V_PLACEHOLDER'
+summary: Simple package manager for GitHub releases and source builds
+description: |
+  gpkg is a user-focused package manager that installs either release
+  binaries or builds from source into a configurable prefix.
+  
+  Features:
+  - Install from GitHub releases or build from source
+  - Secure downloads with checksum verification
+  - Isolated installations in configurable prefix
+  - Package management (install, upgrade, rollback, uninstall)
+  - Source repositories support
+  - Package discovery and search
+  - CI-friendly with JSON output
+
+grade: stable
+confinement: strict
+
+architectures:
+  - build-on: amd64
+  - build-on: arm64
+  - build-on: armhf
+
+apps:
+  gpkg:
+    command: bin/gpkg
+    plugs:
+      - home
+      - network
+      - network-bind
+
+parts:
+  gpkg:
+    plugin: go
+    source: .
+    source-type: git
+    source-tag: 'VERSION_PLACEHOLDER'
+    build-packages:
+      - gcc
+      - libsqlite3-dev
+    stage-packages:
+      - libsqlite3-0
+    override-build: |
+      # Build with CGO for SQLite support
+      export CGO_ENABLED=1
+      go build -o $SNAPCRAFT_PART_INSTALL/bin/gpkg -ldflags="-X main.version=VERSION_NO_V_PLACEHOLDER" .
+SNAP_EOF
+
+        # Replace placeholders
+        sed -i "s/VERSION_NO_V_PLACEHOLDER/${VERSION_NO_V}/g" snap/snapcraft.yaml
+        sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" snap/snapcraft.yaml
+        
+        echo "Generated snapcraft.yaml:"
+        cat snap/snapcraft.yaml
+
+    - name: Build Snap package
+      uses: snapcore/action-build@v1
+      id: build
+
+    - name: Upload Snap to GitHub Release
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        VERSION: ${{ steps.version.outputs.VERSION }}
+      run: |
+        SNAP_FILE="${{ steps.build.outputs.snap }}"
+        
+        if [ -f "$SNAP_FILE" ]; then
+          echo "Uploading Snap package to release..."
+          gh release upload "${VERSION}" "$SNAP_FILE" --clobber
+          echo "✅ Snap package uploaded: $SNAP_FILE"
+        else
+          echo "❌ Snap file not found: $SNAP_FILE"
+          exit 1
+        fi
+
+    - name: Publish to Snap Store
+      uses: snapcore/action-publish@v1
+      if: success()
+      env:
+        SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+      with:
+        snap: ${{ steps.build.outputs.snap }}
+        release: stable
+
+    - name: Generate Snap installation instructions
+      run: |
+        VERSION="${{ steps.version.outputs.VERSION }}"
+        cat << EOF
+        
+        📦 Snap package built and published!
+        
+        Install from Snap Store:
+        
+        # Install stable release
+        sudo snap install gpkg
+        
+        # Or install from edge channel (for testing)
+        sudo snap install gpkg --edge
+        
+        # Grant necessary permissions
+        sudo snap connect gpkg:home
+        sudo snap connect gpkg:network
+        
+        # Verify installation
+        gpkg --version
+        
+        Available on: amd64, arm64, armhf
+        EOF
+
+    - name: Comment on release success
+      if: success()
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        VERSION: ${{ steps.version.outputs.VERSION }}
+      run: |
+        echo "✅ Snap package has been published to the Snap Store!"
+        echo ""
+        echo "📦 Install with: sudo snap install gpkg"
+        echo ""
+        echo "🔗 Snap Store: https://snapcraft.io/gpkg"
+        echo ""
+        echo "⚠️ Note: Publishing to Snap Store requires SNAPCRAFT_STORE_CREDENTIALS secret."
+        echo "If not configured, the Snap package is still available in GitHub Releases."
+
+  build-and-publish-docker:
+    name: Build and Publish Docker Images
+    runs-on: ubuntu-latest
+    needs: build-and-release
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Determine version
+      id: version
+      run: |
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          VERSION="${{ github.event.inputs.tag }}"
+        else
+          VERSION="${GITHUB_REF#refs/tags/}"
+        fi
+        echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
+        echo "Building Docker images for version: ${VERSION}"
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ghcr.io/${{ github.repository }}
+        tags: |
+          type=semver,pattern={{version}},value=${{ steps.version.outputs.VERSION }}
+          type=semver,pattern={{major}}.{{minor}},value=${{ steps.version.outputs.VERSION }}
+          type=semver,pattern={{major}},value=${{ steps.version.outputs.VERSION }}
+          type=raw,value=latest,enable=${{ !contains(steps.version.outputs.VERSION, '-') }}
+        labels: |
+          org.opencontainers.image.title=gpkg
+          org.opencontainers.image.description=Simple package manager for GitHub releases and source builds
+          org.opencontainers.image.vendor=grave0x
+          org.opencontainers.image.licenses=MIT
+          org.opencontainers.image.version=${{ steps.version.outputs.VERSION }}
+
+    - name: Log in to GitHub Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build and push Docker images
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./Dockerfile
+        platforms: linux/amd64,linux/arm64
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        build-args: |
+          VERSION=${{ steps.version.outputs.VERSION }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Generate Docker usage instructions
+      run: |
+        VERSION="${{ steps.version.outputs.VERSION }}"
+        cat << EOF
+        
+        🐳 Docker images published successfully!
+        
+        Pull and use the image:
+        
+        # Pull specific version
+        docker pull ghcr.io/${{ github.repository }}:${VERSION}
+        
+        # Pull latest (stable releases only)
+        docker pull ghcr.io/${{ github.repository }}:latest
+        
+        # Run gpkg in Docker
+        docker run --rm ghcr.io/${{ github.repository }}:${VERSION} --version
+        
+        # Run with volume mount for persistent storage
+        docker run --rm -v \$(pwd)/.gpkg:/home/gpkg/.gpkg ghcr.io/${{ github.repository }}:${VERSION} list
+        
+        # Interactive usage
+        docker run -it --rm -v \$(pwd)/.gpkg:/home/gpkg/.gpkg ghcr.io/${{ github.repository }}:${VERSION} shell
+        
+        Available platforms: linux/amd64, linux/arm64
+        EOF
+
+  announce-release:
+    name: Announce Release
+    runs-on: ubuntu-latest
+    needs: [build-and-release, update-homebrew, build-and-publish-docker]
+    if: ${{ !contains(needs.build-and-release.outputs.VERSION, '-') }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Determine version
+      id: version
+      run: |
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          VERSION="${{ github.event.inputs.tag }}"
+        else
+          VERSION="${GITHUB_REF#refs/tags/}"
+        fi
+        VERSION_NO_V="${VERSION#v}"
+        echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
+        echo "VERSION_NO_V=${VERSION_NO_V}" >> $GITHUB_OUTPUT
+
+    - name: Create release announcement
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const version = '${{ steps.version.outputs.VERSION }}';
+          const versionNoV = '${{ steps.version.outputs.VERSION_NO_V }}';
+          const releaseUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/releases/tag/${version}`;
+          
+          const announcement = `## 🎉 gpkg ${version} Released!
+          
+          We're excited to announce the release of **gpkg ${versionNoV}**!
+          
+          ### 📦 Downloads
+          - **GitHub Release:** ${releaseUrl}
+          - **Homebrew:** \`brew install gpkg\` (formula update pending)
+          - **Docker:** \`docker pull ghcr.io/${context.repo.owner}/${context.repo.repo}:${version}\`
+          
+          ### 🚀 Installation
+          
+          **Linux/macOS:**
+          \`\`\`bash
+          curl -LO ${releaseUrl}/download/gpkg-${version}-linux-amd64.tar.gz
+          tar -xzf gpkg-${version}-linux-amd64.tar.gz
+          sudo mv gpkg-${version}-linux-amd64 /usr/local/bin/gpkg
+          chmod +x /usr/local/bin/gpkg
+          \`\`\`
+          
+          **Windows:**
+          Download the Windows zip from the [release page](${releaseUrl}).
+          
+          ### 📝 Changelog
+          See the [full release notes](${releaseUrl}) for details on what's new.
+          
+          ### 🐛 Found a bug?
+          Please report it on our [issue tracker](https://github.com/${context.repo.owner}/${context.repo.repo}/issues).
+          
+          ---
+          
+          Thank you to all contributors! 🙏`;
+          
+          // Create a GitHub Discussion for the release
+          try {
+            const discussions = await github.graphql(`
+              query($owner: String!, $repo: String!) {
+                repository(owner: $owner, name: $repo) {
+                  discussionCategories(first: 10) {
+                    nodes {
+                      id
+                      name
+                    }
+                  }
+                }
+              }
+            `, {
+              owner: context.repo.owner,
+              repo: context.repo.repo
+            });
+            
+            const announcementCategory = discussions.repository.discussionCategories.nodes.find(
+              cat => cat.name === 'Announcements' || cat.name === 'General'
+            );
+            
+            if (announcementCategory) {
+              await github.graphql(`
+                mutation($repositoryId: ID!, $categoryId: ID!, $title: String!, $body: String!) {
+                  createDiscussion(input: {
+                    repositoryId: $repositoryId
+                    categoryId: $categoryId
+                    title: $title
+                    body: $body
+                  }) {
+                    discussion {
+                      url
+                    }
+                  }
+                }
+              `, {
+                repositoryId: discussions.repository.id,
+                categoryId: announcementCategory.id,
+                title: `Release: gpkg ${version}`,
+                body: announcement
+              });
+              
+              console.log('✅ Release announcement created in Discussions');
+            }
+          } catch (error) {
+            console.log('ℹ️ Could not create discussion (may not be enabled):', error.message);
+          }
+
+    - name: Post to release page
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const version = '${{ steps.version.outputs.VERSION }}';
+          
+          console.log(`✅ Release ${version} announced successfully!`);
+          console.log(`🔗 Release URL: https://github.com/${context.repo.owner}/${context.repo.repo}/releases/tag/${version}`);
+          console.log(`🐳 Docker: ghcr.io/${context.repo.owner}/${context.repo.repo}:${version}`);
+          console.log(`🍺 Homebrew: brew install gpkg`);
+
+    - name: Summary
+      run: |
+        echo "## 📢 Release Announcement" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "✅ gpkg ${{ steps.version.outputs.VERSION }} has been released!" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Release URL:** https://github.com/${{ github.repository }}/releases/tag/${{ steps.version.outputs.VERSION }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Installation options:**" >> $GITHUB_STEP_SUMMARY
+        echo "- Download from GitHub Releases" >> $GITHUB_STEP_SUMMARY
+        echo "- Homebrew (formula update pending merge)" >> $GITHUB_STEP_SUMMARY
+        echo "- Docker: \`ghcr.io/${{ github.repository }}:${{ steps.version.outputs.VERSION }}\`" >> $GITHUB_STEP_SUMMARY

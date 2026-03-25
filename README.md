@@ -1,8 +1,12 @@
 # gpkg
 
-[![Tests](https://github.com/grave0x/gpkg/workflows/Tests/badge.svg)](https://github.com/grave0x/gpkg/actions/workflows/test.yml)
+[![Tests](https://github.com/grave0x/gpkg/workflows/Test/badge.svg)](https://github.com/grave0x/gpkg/actions/workflows/test.yml)
+[![Code Quality](https://github.com/grave0x/gpkg/workflows/Code%20Quality/badge.svg)](https://github.com/grave0x/gpkg/actions/workflows/code-quality.yml)
+[![Security](https://github.com/grave0x/gpkg/workflows/Security/badge.svg)](https://github.com/grave0x/gpkg/actions/workflows/security.yml)
+[![Release](https://github.com/grave0x/gpkg/workflows/Release/badge.svg)](https://github.com/grave0x/gpkg/actions/workflows/release.yml)
 [![Go Version](https://img.shields.io/badge/go-1.20%2B-blue.svg)](https://golang.org/dl/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Wiki](https://img.shields.io/badge/docs-wiki-blue.svg)](https://github.com/grave0x/gpkg/wiki)
 
 **gpkg** is a simple, user-focused package manager that installs either release binaries or builds from source into a configurable prefix. Think "pacman for GitHub releases + source builds" — designed to be secure, script-friendly, and easy to use.
 
@@ -339,11 +343,16 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - [ ] GUI/TUI interface
 - [ ] Plugin system
 
-## 📞 Support
+## 📞 Support & Documentation
 
-- **Issues**: [GitHub Issues](https://github.com/grave0x/gpkg/issues)
-- **Documentation**: [Wiki](https://github.com/grave0x/gpkg/wiki)
-- **Repository**: [https://github.com/grave0x/gpkg](https://github.com/grave0x/gpkg)
+- **📚 Wiki**: [Complete Documentation](https://github.com/grave0x/gpkg/wiki)
+  - [Getting Started](https://github.com/grave0x/gpkg/wiki/Getting-Started)
+  - [User Guide](https://github.com/grave0x/gpkg/wiki/User-Guide)
+  - [Developer Guide](https://github.com/grave0x/gpkg/wiki/Developer-Guide)
+  - [API Reference](https://github.com/grave0x/gpkg/wiki/Reference)
+- **🐛 Issues**: [GitHub Issues](https://github.com/grave0x/gpkg/issues)
+- **🔧 Troubleshooting**: [Common Issues](https://github.com/grave0x/gpkg/wiki/Troubleshooting)
+- **🏗️ Workflows**: [CI/CD Documentation](.github/workflows/README.md)
 
 ## 🙏 Acknowledgments
 

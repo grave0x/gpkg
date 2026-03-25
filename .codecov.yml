@@ -1,0 +1,75 @@
+# Codecov configuration
+# Learn more at: https://docs.codecov.io/docs/codecov-yaml
+
+coverage:
+  precision: 2
+  round: down
+  range: "70...100"
+  
+  status:
+    project:
+      default:
+        target: 80%                # Target coverage percentage
+        threshold: 1%              # Allow 1% decrease
+        if_ci_failed: error
+        informational: false
+    
+    patch:
+      default:
+        target: 75%                # Target coverage for new code
+        threshold: 5%              # Allow 5% decrease for patches
+        if_ci_failed: error
+        informational: false
+
+# Ignore specific paths from coverage
+ignore:
+  - "tests/**/*"                   # Test files
+  - "examples/**/*"                # Example code
+  - "**/*_test.go"                 # Go test files
+  - "scripts/**/*"                 # Build scripts
+  - "bin/**/*"                     # Compiled binaries
+
+# Comment settings for pull requests
+comment:
+  layout: "header, diff, flags, components, footer"
+  behavior: default               # Update existing comment
+  require_changes: false          # Always comment
+  require_base: false
+  require_head: true
+
+# Flag configuration
+flags:
+  ubuntu-latest-go1.22:
+    carryforward: true
+  ubuntu-latest-go1.21:
+    carryforward: true
+  ubuntu-latest-go1.20:
+    carryforward: true
+  macos-latest-go1.22:
+    carryforward: true
+  macos-latest-go1.21:
+    carryforward: true
+  macos-latest-go1.20:
+    carryforward: true
+  windows-latest-go1.22:
+    carryforward: true
+  windows-latest-go1.21:
+    carryforward: true
+  windows-latest-go1.20:
+    carryforward: true
+
+# Component configuration (adjust based on your project structure)
+component_management:
+  individual_components:
+    - component_id: pkg
+      name: "Core Package"
+      paths:
+        - "pkg/**/*.go"
+    - component_id: cmd
+      name: "CLI Commands"
+      paths:
+        - "cmd/**/*.go"
+    - component_id: internal
+      name: "Internal Packages"
+      paths:
+        - "internal/**/*.go"
