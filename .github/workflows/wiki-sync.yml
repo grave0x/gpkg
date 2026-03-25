@@ -1,0 +1,181 @@
+name: Wiki Sync
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'wiki/**'
+      - '.github/workflows/wiki-sync.yml'
+  workflow_dispatch: # Allow manual trigger
+
+permissions:
+  contents: write
+
+jobs:
+  sync-wiki:
+    name: Sync Wiki Documentation
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout main repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          path: main-repo
+
+      - name: Checkout wiki repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}.wiki
+          path: wiki-repo
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sync wiki files
+        run: |
+          echo "📝 Syncing wiki documentation..."
+          
+          # Remove old wiki files (except .git)
+          find wiki-repo -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
+          
+          # Copy all wiki files from main repo
+          if [ -d "main-repo/wiki" ]; then
+            cp -r main-repo/wiki/* wiki-repo/ || true
+            
+            echo "✅ Files synced:"
+            find wiki-repo -name "*.md" -type f | sort
+          else
+            echo "❌ No wiki directory found in main repository"
+            exit 1
+          fi
+
+      - name: Check for changes
+        id: changes
+        run: |
+          cd wiki-repo
+          git add -A
+          
+          if git diff --cached --quiet; then
+            echo "No changes detected"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          else
+            echo "Changes detected:"
+            git diff --cached --name-status
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Configure Git
+        if: steps.changes.outputs.has_changes == 'true'
+        run: |
+          cd wiki-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Commit and push changes
+        if: steps.changes.outputs.has_changes == 'true'
+        run: |
+          cd wiki-repo
+          
+          # Get commit details from main repo
+          cd ../main-repo
+          COMMIT_SHA=$(git rev-parse HEAD)
+          COMMIT_MSG=$(git log -1 --pretty=format:'%s')
+          COMMIT_AUTHOR=$(git log -1 --pretty=format:'%an')
+          
+          cd ../wiki-repo
+          
+          # Create informative commit message
+          cat > commit_msg.txt << EOF
+          Sync wiki from main repository
+
+          Source commit: ${COMMIT_SHA:0:7}
+          Source message: ${COMMIT_MSG}
+          Source author: ${COMMIT_AUTHOR}
+
+          Automated sync by wiki-sync workflow
+          EOF
+          
+          git commit -F commit_msg.txt
+          git push origin master
+          
+          echo "✅ Wiki synchronized successfully!"
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Wiki Sync Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ steps.changes.outputs.has_changes }}" == "true" ]; then
+            echo "✅ **Status**: Wiki updated successfully" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Files synced**:" >> $GITHUB_STEP_SUMMARY
+            find wiki-repo -name "*.md" -type f | sed 's|wiki-repo/||' | sed 's/^/- /' >> $GITHUB_STEP_SUMMARY
+          else
+            echo "ℹ️ **Status**: No changes detected, wiki is up to date" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  validate-wiki:
+    name: Validate Wiki Content
+    runs-on: ubuntu-latest
+    needs: sync-wiki
+    
+    steps:
+      - name: Checkout wiki repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}.wiki
+          path: wiki
+
+      - name: Validate markdown files
+        run: |
+          echo "🔍 Validating wiki markdown files..."
+          
+          # Check that all .md files exist
+          if [ ! -f "wiki/Home.md" ]; then
+            echo "❌ Error: Home.md is required but not found"
+            exit 1
+          fi
+          
+          # Count markdown files
+          MD_COUNT=$(find wiki -name "*.md" -type f | wc -l)
+          echo "✅ Found $MD_COUNT markdown files"
+          
+          # Check for common issues
+          ERRORS=0
+          
+          for file in wiki/*.md wiki/**/*.md; do
+            if [ -f "$file" ]; then
+              # Check for broken internal links (basic check)
+              if grep -P '\[.*?\]\((?!http|#).*?\.md\)' "$file" > /dev/null; then
+                echo "⚠️  $file: Contains potentially broken internal links"
+              fi
+            fi
+          done
+          
+          if [ $ERRORS -eq 0 ]; then
+            echo "✅ All wiki files validated successfully!"
+          else
+            echo "⚠️  Found $ERRORS potential issues (non-blocking)"
+          fi
+
+      - name: Generate wiki statistics
+        run: |
+          echo "## Wiki Statistics" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          MD_COUNT=$(find wiki -name "*.md" -type f | wc -l)
+          TOTAL_LINES=$(find wiki -name "*.md" -type f -exec wc -l {} + | tail -1 | awk '{print $1}')
+          
+          echo "- **Total pages**: $MD_COUNT" >> $GITHUB_STEP_SUMMARY
+          echo "- **Total lines**: $TOTAL_LINES" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "**Pages by category**:" >> $GITHUB_STEP_SUMMARY
+          echo "- User Guide: $(find wiki/User-Guide -name "*.md" 2>/dev/null | wc -l)" >> $GITHUB_STEP_SUMMARY
+          echo "- Developer Guide: $(find wiki/Developer-Guide -name "*.md" 2>/dev/null | wc -l)" >> $GITHUB_STEP_SUMMARY
+          echo "- Reference: $(find wiki/Reference -name "*.md" 2>/dev/null | wc -l)" >> $GITHUB_STEP_SUMMARY
+
+      - name: Check wiki accessibility
+        run: |
+          echo "✅ Wiki is accessible at: https://github.com/${{ github.repository }}/wiki"

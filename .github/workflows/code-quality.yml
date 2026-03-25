@@ -1,0 +1,204 @@
+name: Code Quality
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  code-quality:
+    name: Code Quality Checks
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Install quality tools
+        run: |
+          go install golang.org/x/tools/cmd/goimports@latest
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          go install github.com/gordonklaus/ineffassign@latest
+          go install github.com/client9/misspell/cmd/misspell@latest
+
+      - name: Run gofmt
+        id: gofmt
+        run: |
+          echo "## gofmt Results" >> $GITHUB_STEP_SUMMARY
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "❌ The following files are not formatted:" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "$unformatted" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "Run 'gofmt -w .' to fix" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          else
+            echo "✅ All files are properly formatted" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Run goimports
+        id: goimports
+        run: |
+          echo "## goimports Results" >> $GITHUB_STEP_SUMMARY
+          unorganized=$(goimports -l .)
+          if [ -n "$unorganized" ]; then
+            echo "⚠️ The following files have unorganized imports:" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "$unorganized" >> $GITHUB_STEP_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "Run 'goimports -w .' to fix" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          else
+            echo "✅ All imports are properly organized" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Run go vet
+        id: govet
+        run: |
+          echo "## go vet Results" >> $GITHUB_STEP_SUMMARY
+          if go vet ./...; then
+            echo "✅ No issues found by go vet" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ go vet found issues" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+
+      - name: Run staticcheck
+        id: staticcheck
+        run: |
+          echo "## staticcheck Results" >> $GITHUB_STEP_SUMMARY
+          if staticcheck ./...; then
+            echo "✅ No issues found by staticcheck" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ staticcheck found issues" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+
+      - name: Run ineffassign
+        id: ineffassign
+        run: |
+          echo "## ineffassign Results" >> $GITHUB_STEP_SUMMARY
+          if ineffassign ./...; then
+            echo "✅ No ineffectual assignments detected" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ ineffassign found issues" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+
+      - name: Run misspell
+        id: misspell
+        run: |
+          echo "## misspell Results" >> $GITHUB_STEP_SUMMARY
+          if misspell_output=$(misspell -error .); then
+            echo "✅ No spelling errors detected" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Spelling errors found:" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "$misspell_output" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+
+      - name: Generate quality metrics
+        id: metrics
+        if: always()
+        run: |
+          echo "## Code Quality Metrics" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Lines of code
+          echo "### Lines of Code" >> $GITHUB_STEP_SUMMARY
+          total_lines=$(find . -name '*.go' -not -path './vendor/*' -not -path './.git/*' | xargs wc -l | tail -1 | awk '{print $1}')
+          echo "- Total Go lines: **$total_lines**" >> $GITHUB_STEP_SUMMARY
+          
+          # File counts
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### File Statistics" >> $GITHUB_STEP_SUMMARY
+          go_files=$(find . -name '*.go' -not -path './vendor/*' -not -path './.git/*' | wc -l)
+          test_files=$(find . -name '*_test.go' -not -path './vendor/*' -not -path './.git/*' | wc -l)
+          echo "- Total Go files: **$go_files**" >> $GITHUB_STEP_SUMMARY
+          echo "- Test files: **$test_files**" >> $GITHUB_STEP_SUMMARY
+          
+          # Package count
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Package Information" >> $GITHUB_STEP_SUMMARY
+          packages=$(go list ./... | wc -l)
+          echo "- Total packages: **$packages**" >> $GITHUB_STEP_SUMMARY
+          
+          # Cyclomatic complexity (using gocyclo if available)
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Complexity Analysis" >> $GITHUB_STEP_SUMMARY
+          if command -v gocyclo &> /dev/null; then
+            avg_complexity=$(gocyclo -avg . 2>/dev/null || echo "N/A")
+            echo "- Average cyclomatic complexity: **$avg_complexity**" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- Cyclomatic complexity: *Not available*" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Generate quality report
+        if: always()
+        run: |
+          mkdir -p coverage
+          cat > coverage/quality-report.md << 'EOF'
+          # Code Quality Report
+          
+          Generated: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          
+          ## Quality Checks Summary
+          
+          | Check | Status |
+          |-------|--------|
+          | gofmt | ${{ steps.gofmt.outcome }} |
+          | goimports | ${{ steps.goimports.outcome }} |
+          | go vet | ${{ steps.govet.outcome }} |
+          | staticcheck | ${{ steps.staticcheck.outcome }} |
+          | ineffassign | ${{ steps.ineffassign.outcome }} |
+          | misspell | ${{ steps.misspell.outcome }} |
+          
+          ## Recommendations
+          
+          - Run `make fmt` or `gofmt -w .` to format code
+          - Run `goimports -w .` to organize imports
+          - Address any issues reported by static analysis tools
+          - Fix spelling errors in comments and documentation
+          
+          EOF
+
+      - name: Upload quality report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-report
+          path: coverage/quality-report.md
+          retention-days: 30
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "## Overall Status" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Check | Result |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| gofmt | ${{ steps.gofmt.outcome }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| goimports | ${{ steps.goimports.outcome }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| go vet | ${{ steps.govet.outcome }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| staticcheck | ${{ steps.staticcheck.outcome }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| ineffassign | ${{ steps.ineffassign.outcome }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| misspell | ${{ steps.misspell.outcome }} |" >> $GITHUB_STEP_SUMMARY

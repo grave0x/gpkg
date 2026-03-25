@@ -1,0 +1,440 @@
+name: Tests
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Test on ${{ matrix.os }} with Go ${{ matrix.go-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        go-version: ['1.20', '1.21', '1.22']
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ matrix.go-version }}
+        cache: true
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Verify dependencies
+      run: go mod verify
+
+    - name: Run go vet
+      run: go vet ./...
+
+    - name: Run go fmt check
+      run: |
+        if [ "$(gofmt -s -l . | wc -l)" -gt 0 ]; then
+          echo "The following files need formatting:"
+          gofmt -s -l .
+          exit 1
+        fi
+      shell: bash
+      if: runner.os != 'Windows'
+
+    - name: Run go fmt check (Windows)
+      run: |
+        $files = gofmt -s -l .
+        if ($files) {
+          echo "The following files need formatting:"
+          echo $files
+          exit 1
+        }
+      shell: pwsh
+      if: runner.os == 'Windows'
+
+    - name: Run tests with coverage
+      run: go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
+
+    - name: Generate coverage report
+      run: go tool cover -html=coverage.out -o coverage.html
+      if: always()
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v4
+      with:
+        file: ./coverage.out
+        flags: ${{ matrix.os }}-go${{ matrix.go-version }}
+        name: codecov-${{ matrix.os }}-go${{ matrix.go-version }}
+        fail_ci_if_error: false
+        verbose: true
+      env:
+        CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+      continue-on-error: true
+
+    - name: Upload coverage artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: coverage-${{ matrix.os }}-go${{ matrix.go-version }}
+        path: |
+          coverage.out
+          coverage.html
+        retention-days: 14
+      if: always()
+
+    - name: Build
+      run: go build -v ./...
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.22'
+        cache: true
+
+    - name: Run golangci-lint
+      uses: golangci/golangci-lint-action@v6
+      with:
+        version: latest
+        args: --timeout=10m --verbose --print-issued-lines=true --print-linter-name=true --issues-exit-code=1
+        skip-cache: false
+        skip-pkg-cache: false
+        skip-build-cache: false
+        install-mode: "binary"
+
+  coverage-report:
+    name: Coverage Report
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'pull_request'
+    permissions:
+      pull-requests: write
+      contents: read
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.22'
+        cache: true
+
+    - name: Run tests with coverage
+      run: go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
+
+    - name: Generate coverage summary
+      id: coverage
+      run: |
+        total=$(go tool cover -func=coverage.out | grep total | awk '{print $3}')
+        echo "total=$total" >> $GITHUB_OUTPUT
+        echo "## Coverage Report" >> coverage_comment.txt
+        echo "" >> coverage_comment.txt
+        echo "**Total Coverage: $total**" >> coverage_comment.txt
+        echo "" >> coverage_comment.txt
+        echo "### Coverage by Package" >> coverage_comment.txt
+        echo '```' >> coverage_comment.txt
+        go tool cover -func=coverage.out | head -n -1 >> coverage_comment.txt
+        echo '```' >> coverage_comment.txt
+
+    - name: Comment PR with coverage
+      uses: actions/github-script@v7
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        script: |
+          const fs = require('fs');
+          const coverageComment = fs.readFileSync('coverage_comment.txt', 'utf8');
+          
+          // Find existing coverage comment
+          const comments = await github.rest.issues.listComments({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.issue.number,
+          });
+          
+          const botComment = comments.data.find(comment => 
+            comment.user.type === 'Bot' && 
+            comment.body.includes('## Coverage Report')
+          );
+          
+          if (botComment) {
+            // Update existing comment
+            await github.rest.issues.updateComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: botComment.id,
+              body: coverageComment
+            });
+          } else {
+            // Create new comment
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: coverageComment
+            });
+          }
+
+  benchmark:
+    name: Benchmark
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' || github.event_name == 'pull_request'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.22'
+        cache: true
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Run benchmarks
+      run: |
+        go test -bench=. -benchmem -benchtime=5s -run=^$ ./... | tee benchmark-results.txt
+
+    - name: Store benchmark results
+      uses: actions/upload-artifact@v4
+      with:
+        name: benchmark-results-${{ github.sha }}
+        path: benchmark-results.txt
+        retention-days: 30
+
+    - name: Download previous benchmark results (if available)
+      uses: dawidd6/action-download-artifact@v3
+      if: github.event_name == 'pull_request'
+      continue-on-error: true
+      with:
+        workflow: test.yml
+        branch: main
+        name: benchmark-results-*
+        name_is_regexp: true
+        path: previous-benchmarks/
+        search_artifacts: true
+        if_no_artifact_found: warn
+
+    - name: Compare benchmarks
+      if: github.event_name == 'pull_request'
+      continue-on-error: true
+      run: |
+        if [ -d "previous-benchmarks" ] && [ "$(ls -A previous-benchmarks)" ]; then
+          echo "## Benchmark Comparison" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          PREV_FILE=$(find previous-benchmarks -name "benchmark-results.txt" -type f | head -1)
+          
+          if [ -f "$PREV_FILE" ]; then
+            echo "### Current Benchmarks" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            cat benchmark-results.txt >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            
+            echo "### Previous Benchmarks (main branch)" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            cat "$PREV_FILE" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "⚠️ Manual comparison required. Consider using benchstat for detailed analysis." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "No previous benchmark file found for comparison." >> $GITHUB_STEP_SUMMARY
+          fi
+        else
+          echo "## Benchmark Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "No previous benchmarks available for comparison (first run or not found)." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat benchmark-results.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+        fi
+
+    - name: Comment benchmark results on PR
+      if: github.event_name == 'pull_request'
+      continue-on-error: true
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          const benchmarkResults = fs.readFileSync('benchmark-results.txt', 'utf8');
+          
+          const body = `### 📊 Benchmark Results
+          
+          <details>
+          <summary>Click to expand benchmark results</summary>
+          
+          \`\`\`
+          ${benchmarkResults}
+          \`\`\`
+          
+          </details>
+          
+          💡 **Tip**: Use \`benchstat\` locally for detailed performance comparisons.`;
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: body
+          });
+
+  integration-tests:
+    name: Integration Tests on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        go-version: ['1.22']
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ matrix.go-version }}
+        cache: true
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Build gpkg binary
+      run: go build -o gpkg ./cmd/gpkg
+
+    - name: Make binary executable
+      run: chmod +x gpkg
+      if: runner.os != 'Windows'
+
+    - name: Add binary to PATH
+      run: echo "${{ github.workspace }}" >> $GITHUB_PATH
+      shell: bash
+
+    - name: Run integration tests
+      run: go test ./tests/integration/... -v
+      env:
+        GPKG_BINARY: ${{ github.workspace }}/gpkg
+
+  build-all-platforms:
+    name: Build for all platforms
+    runs-on: ubuntu-latest
+    needs: [test, lint]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.22'
+        cache: true
+
+    - name: Build for multiple platforms
+      run: |
+        GOOS=linux GOARCH=amd64 go build -o dist/gpkg-linux-amd64 ./cmd/gpkg
+        GOOS=linux GOARCH=arm64 go build -o dist/gpkg-linux-arm64 ./cmd/gpkg
+        GOOS=darwin GOARCH=amd64 go build -o dist/gpkg-darwin-amd64 ./cmd/gpkg
+        GOOS=darwin GOARCH=arm64 go build -o dist/gpkg-darwin-arm64 ./cmd/gpkg
+        GOOS=windows GOARCH=amd64 go build -o dist/gpkg-windows-amd64.exe ./cmd/gpkg
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: binaries
+        path: dist/
+        retention-days: 7
+
+  notify-failure:
+    name: Notify on Failure
+    runs-on: ubuntu-latest
+    needs: [test, lint, coverage-report, benchmarks, integration-tests, build-all-platforms]
+    if: failure() && github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Create failure issue
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const workflowUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+          
+          const issueTitle = `CI Failure on main: ${context.workflow}`;
+          const issueBody = `## 🚨 CI Failure Alert
+          
+          The **${context.workflow}** workflow failed on the \`main\` branch.
+          
+          **Workflow Run:** ${workflowUrl}
+          **Commit:** ${context.sha.substring(0, 7)}
+          **Author:** @${context.actor}
+          **Triggered by:** ${context.eventName}
+          
+          ### Failed Jobs
+          ${JSON.stringify(context.payload, null, 2)}
+          
+          ### Next Steps
+          1. Review the workflow logs: ${workflowUrl}
+          2. Fix the failing tests or build
+          3. Push a fix to \`main\`
+          
+          This issue was automatically created by the CI workflow.`;
+          
+          // Check if similar issue already exists
+          const issues = await github.rest.issues.listForRepo({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            state: 'open',
+            labels: 'ci-failure',
+            per_page: 5
+          });
+          
+          const existingIssue = issues.data.find(issue => 
+            issue.title === issueTitle
+          );
+          
+          if (existingIssue) {
+            // Comment on existing issue
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: existingIssue.number,
+              body: `Another failure occurred:\n${workflowUrl}\n\nCommit: ${context.sha.substring(0, 7)}`
+            });
+          } else {
+            // Create new issue
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: issueTitle,
+              body: issueBody,
+              labels: ['ci-failure', 'automated', 'priority-high']
+            });
+          }
+    
+    - name: Post summary
+      if: always()
+      run: |
+        echo "## ⚠️ CI Failure Notification" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "A GitHub issue has been created to track this failure." >> $GITHUB_STEP_SUMMARY
+        echo "Check the [Issues page](https://github.com/${{ github.repository }}/issues?q=is%3Aissue+is%3Aopen+label%3Aci-failure) for details." >> $GITHUB_STEP_SUMMARY

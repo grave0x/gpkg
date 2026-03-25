@@ -1,2 +1,39 @@
-#Ignore all txt files
-*.txt
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+dist/
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage
+coverage.*
+
+# Go workspace file
+go.work
+
+# Dependency directories
+vendor/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# gpkg specific
+.gpkg/
+*.log
+
+# Build artifacts
+*.tar.gz
+*.zip
+checksums.txt
